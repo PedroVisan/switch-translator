@@ -1,0 +1,23 @@
+[project]
+name = "switch-translator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "PedroVisan", email = "pedrovianasnts@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "customtkinter>=6.0.0",
+    "google-genai>=3.6.1",
+    "pyinstaller>=6.22.3",
+    "pywin32>=312",
+    "unitypy>=1.25.4",
+]
+
+[project.scripts]
+switch-translator = "switch_translator:main"
+
+[build-system]
+requires = ["uv_build>=0.13.9,<0.14.0"]
+build-backend = "uv_build"

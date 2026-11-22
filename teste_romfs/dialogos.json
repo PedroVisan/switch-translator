@@ -1,0 +1,5 @@
+﻿{
+  "menu_start": "Press A to start the adventure!",
+  "npc_01": "Watch out, {player}!\nThere are monsters ahead.",
+  "item_get": "You found a [color=gold]Rusty Sword[/color]!"
+}

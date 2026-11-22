@@ -1,0 +1,24 @@
+# Ambiente Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+
+# Arquivos temporários, dumps e mods gerados
+trabalho_temp/
+patches_prontos/
+*.cpk
+*.CPK
+*.dat
+*.DAT
+*.ffu
+*.zip
+*.nsp
+*.xci
+
+# Chaves e configurações locais
+.env
+*.key
+config.json
