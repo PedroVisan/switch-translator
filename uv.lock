@@ -963,6 +963,11 @@ dependencies = [
     { name = "unitypy" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pyinstaller" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "customtkinter", specifier = ">=6.0.0" },
@@ -971,6 +976,9 @@ requires-dist = [
     { name = "pywin32", specifier = ">=312" },
     { name = "unitypy", specifier = ">=1.25.4" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pyinstaller", specifier = ">=6.22.3" }]
 
 [[package]]
 name = "tenacity"
