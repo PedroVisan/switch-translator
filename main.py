@@ -11,13 +11,13 @@ from translator import translate_with_checkpoint
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-BATCH_SIZE = 250  # Quantidade de falas traduzidas por chamada na API
+BATCH_SIZE = 120  # Calibrado para não estourar TPM/RPM em contas gratuitas
 
 
 class SwitchTranslatorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Switch Auto-Translator (CNX)")
+        self.title("Switch Auto-Translator (CNX) v1.0.1")
         self.geometry("700x640")
         self.resizable(False, False)
 
@@ -213,7 +213,7 @@ class SwitchTranslatorApp(ctk.CTk):
 
             # Etapa 1: Extração automática conforme a engine
             self.log("Analisando engine e extraindo legendas do RomFS...")
-            ext_info = extract_texts(self.romfs_dir, work_dir)
+            ext_info = extract_texts(self.romfs_dir, work_dir, log_fn=self.log)
             total_strings = ext_info["total_strings"]
             engine = ext_info["engine"]
 

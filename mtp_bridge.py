@@ -2,34 +2,42 @@ import re
 import pythoncom
 import win32com.client
 
+TITLE_ID_RE = re.compile(r"\[([0-9A-Fa-f]{16})\]")
 
-def get_switch_folder():
-    # Necessário para chamadas COM funcionarem dentro de threads no Windows
+
+def list_installed_games() -> list[dict] | None:
     pythoncom.CoInitialize()
     shell = win32com.client.Dispatch("Shell.Application")
-    this_pc = shell.NameSpace(17)  # 17 = "Este Computador"
+    my_computer = shell.NameSpace(17)
+    if not my_computer:
+        return None
 
-    for item in this_pc.Items():
-        if "switch" in item.Name.lower():
-            return item.GetFolder
-    return None
+    installed_games_folder = None
+    for item in my_computer.Items():
+        path = getattr(item, "Path", "") or ""
+        if len(path) <= 3 and ":" in path:
+            continue
+        try:
+            dev_folder = item.GetFolder
+            if not dev_folder:
+                continue
+            for sub in dev_folder.Items():
+                if sub.Name.strip().lower() == "installed games":
+                    installed_games_folder = sub.GetFolder
+                    break
+        except Exception:
+            continue
+        if installed_games_folder:
+            break
 
-
-def list_installed_games():
-    switch_folder = get_switch_folder()
-    if not switch_folder:
-        return None  # Switch não conectado ou DBI MTP fechado
+    if not installed_games_folder:
+        return None
 
     games = []
-    for sub in switch_folder.Items():
-        if "installed games" in sub.Name.lower():
-            for game_item in sub.GetFolder.Items():
-                raw_name = game_item.Name
-                match = re.search(r"\[([0-9A-Fa-f]{16})\]", raw_name)
-                title_id = match.group(1).upper() if match else "SEM_ID"
-                games.append({
-                    "name": raw_name,
-                    "title_id": title_id,
-                })
-            break
+    for game_item in installed_games_folder.Items():
+        raw_name = game_item.Name.strip()
+        match = TITLE_ID_RE.search(raw_name)
+        tid = match.group(1).upper() if match else "SEM_ID"
+        games.append({"name": raw_name, "title_id": tid})
+
     return games

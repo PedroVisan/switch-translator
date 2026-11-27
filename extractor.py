@@ -7,6 +7,12 @@ from font_handler import auto_patch_romfs_fonts
 from stcm2l_handler import parse_stcm2l_strings, rebuild_stcm2l
 
 TEXT_EXTENSIONS = {".txt", ".json", ".csv", ".xml", ".yaml", ".yml", ".tsv", ".ini"}
+SKIP_CPK_PREFIXES = ("MOVIE", "VOICE", "SOUND", "BGM", "SE_", "THUMB", "VO.", "VO_")
+
+
+def _is_media_cpk(filename: str) -> bool:
+    upper = filename.upper()
+    return any(upper.startswith(p) for p in SKIP_CPK_PREFIXES)
 
 
 def _detect_engine(romfs_dir: str) -> str:
@@ -17,7 +23,9 @@ def _detect_engine(romfs_dir: str) -> str:
     return "plain_text"
 
 
-def _extract_cri_otomate(romfs_path: Path, work_path: Path) -> tuple[dict[str, str], dict[str, dict]]:
+def _extract_cri_otomate(
+    romfs_path: Path, work_path: Path, log_fn=print
+) -> tuple[dict[str, str], dict[str, dict]]:
     cpk_extract_dir = work_path / "cpk_extraido"
     cpk_extract_dir.mkdir(parents=True, exist_ok=True)
 
@@ -29,6 +37,11 @@ def _extract_cri_otomate(romfs_path: Path, work_path: Path) -> tuple[dict[str, s
         if not cpk_file.is_file() or cpk_file.suffix.lower() != ".cpk":
             continue
 
+        if _is_media_cpk(cpk_file.name):
+            log_fn(f"[CPK] Pulando arquivo de mídia: {cpk_file.name}")
+            continue
+
+        log_fn(f"[CPK] Extraindo scripts de {cpk_file.name}...")
         cpk_rel_path = cpk_file.relative_to(romfs_path).as_posix()
         unpacked_dir = cpk_extract_dir / cpk_file.stem
         unpack_cpk(str(cpk_file), str(unpacked_dir))
@@ -91,7 +104,7 @@ def _extract_plain_text(romfs_path: Path) -> tuple[dict[str, str], dict[str, dic
     return strings_map, manifest
 
 
-def extract_texts(romfs_dir: str, work_dir: str) -> dict:
+def extract_texts(romfs_dir: str, work_dir: str, log_fn=print) -> dict:
     """
     Detecta a engine do jogo e extrai todas as strings traduzíveis para JSON,
     gerando também o manifest.json necessário para reconstruir o LayeredFS.
@@ -102,7 +115,7 @@ def extract_texts(romfs_dir: str, work_dir: str) -> dict:
 
     engine = _detect_engine(romfs_dir)
     if engine == "cri_otomate":
-        strings_map, manifest = _extract_cri_otomate(romfs_path, work_path)
+        strings_map, manifest = _extract_cri_otomate(romfs_path, work_path, log_fn=log_fn)
     else:
         strings_map, manifest = _extract_plain_text(romfs_path)
 
@@ -148,7 +161,6 @@ def build_layeredfs_patch(
     patch_romfs = atmosphere_root / "contents" / title_id / "romfs"
     patch_romfs.mkdir(parents=True, exist_ok=True)
 
-    # Agrupa traduções por (cpk_rel_path, unpacked_cpk_dir, internal_rel_path) -> {str_offset: texto}
     stcm2l_groups: dict[tuple[str, str, str], dict[int, str]] = defaultdict(dict)
     plain_groups: dict[str, list[dict]] = defaultdict(list)
 
@@ -175,7 +187,6 @@ def build_layeredfs_patch(
                 }
             )
 
-    # Reconstrói cada script STCM2L (.DAT) modificado
     cpk_modifications: dict[str, dict[str, bytes]] = defaultdict(dict)
     for (cpk_rel_path, unpacked_cpk_dir, internal_rel_path), offsets_map in stcm2l_groups.items():
         dat_path = Path(unpacked_cpk_dir) / Path(internal_rel_path)
@@ -186,7 +197,6 @@ def build_layeredfs_patch(
         if rebuilt_dat != raw_dat:
             cpk_modifications[cpk_rel_path][internal_rel_path] = rebuilt_dat
 
-    # Reempacota cada .CPK modificado
     for cpk_rel_path, files_dict in cpk_modifications.items():
         orig_cpk = romfs_path / Path(cpk_rel_path)
         if orig_cpk.is_file():
@@ -194,7 +204,6 @@ def build_layeredfs_patch(
             out_cpk.parent.mkdir(parents=True, exist_ok=True)
             repack_cpk(str(orig_cpk), files_dict, str(out_cpk))
 
-    # Reconstrói arquivos de texto plano (caso a engine não use CPK)
     for rel_path, items in plain_groups.items():
         src_file = romfs_path / Path(rel_path)
         if not src_file.is_file():
@@ -208,7 +217,6 @@ def build_layeredfs_patch(
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text("\n".join(lines), encoding="utf-8")
 
-    # Injeta automaticamente os acentos PT-BR nas fontes .ffu (ex: SYSTEM.CPK)
     auto_patch_romfs_fonts(str(romfs_path), str(patch_romfs), log_fn=log_fn)
 
     return str(atmosphere_root)

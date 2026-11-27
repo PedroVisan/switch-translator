@@ -6,18 +6,17 @@ from google import genai
 from google.genai import types
 
 SYSTEM_PROMPT = (
-    "Você é um localizador profissional de jogos de Nintendo Switch para Português do Brasil (PT-BR). "
+    "Você é um localizador profissional de visual novels de Nintendo Switch para Português do Brasil (PT-BR). "
     "Traduza os valores do objeto JSON recebido mantendo EXATAMENTE as mesmas chaves JSON. "
     "Preserve intactas todas as tags técnicas como #Color[0], #Color[3], #n, \\n, {variaveis}, [colchetes] e símbolos. "
-    "Nunca traduza nomes próprios de personagens (ex: Hoshino, Yanagi, Okazaki, Enomoto, Sasazuka, Shiraishi, Mochida, Saeki). "
-    "Adapte o tom dos diálogos de forma natural ao português brasileiro."
+    "Nunca traduza nomes próprios de personagens (ex: Hoshino, Ichika, Yanagi, Okazaki, Enomoto, Sasazuka, Shiraishi, Mochida, Saeki, Minegishi). "
+    "Mantenha coerência de gênero, registre diálogos emocionais e termos de investigação de forma natural em PT-BR."
 )
 
 TAG_CHECK_RE = re.compile(r"(#Color\[\d+\]|#n|\\n|\{[^}]+\}|\[[^\]]+\])")
 
 
 def _is_safe_translation(orig: str, translated: str) -> bool:
-    """Garante que a IA não deslocou chaves nem corrompeu tags técnicas."""
     if not isinstance(translated, str) or not translated.strip():
         return False
     if TAG_CHECK_RE.findall(orig) != TAG_CHECK_RE.findall(translated):
@@ -28,14 +27,12 @@ def _is_safe_translation(orig: str, translated: str) -> bool:
 
 
 def _discover_available_models(client: genai.Client) -> list[str]:
-    """Consulta a API e ordena os modelos Gemini disponíveis do mais rápido para o mais capaz."""
     preferred_order = [
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
         "gemini-1.5-flash",
-        "gemini-2.5-pro",
     ]
     found = []
     try:
@@ -43,9 +40,15 @@ def _discover_available_models(client: genai.Client) -> list[str]:
             name = (m.name or "").replace("models/", "")
             methods = getattr(m, "supported_generation_methods", None) or []
             if "gemini" in name and "generateContent" in methods:
-                if not any(x in name for x in ("embedding", "imagen", "veo", "tts", "audio")):
+                if not any(x in name for x in ("embedding", "imagen", "veo", "tts", "audio", "pro")):
                     found.append(name)
-    except Exception:
+    except Exception as e:
+        err = str(e)
+        if "API_KEY_INVALID" in err or "API key expired" in err or "400" in err:
+            raise RuntimeError(
+                "A Gemini API Key foi rejeitada pelo Google (inválida ou bloqueada). "
+                "Gere uma nova chave em uma conta @gmail.com pessoal no Google AI Studio."
+            )
         return preferred_order
 
     ordered = [m for m in preferred_order if m in found]
@@ -67,14 +70,10 @@ def translate_with_checkpoint(
     all_strings: dict[str, str],
     api_key: str,
     translated_out_path: str,
-    batch_size: int = 250,
+    batch_size: int = 120,
     log_fn=print,
     progress_fn=None,
 ) -> dict[str, str]:
-    """
-    Deduplica textos idênticos, consulta o cache incremental (translation_cache.json),
-    traduz apenas o inédito com rotação automática de chaves/modelos e salva o JSON final.
-    """
     work_dir = os.path.dirname(translated_out_path)
     os.makedirs(work_dir, exist_ok=True)
     cache_path = os.path.join(work_dir, "translation_cache.json")
@@ -131,19 +130,24 @@ def translate_with_checkpoint(
                         translated_batch = parsed
                 except Exception as err:
                     err_str = str(err)
+                    if "API_KEY_INVALID" in err_str or "API key expired" in err_str:
+                        raise RuntimeError(
+                            "Chave de API inválida ou expirada pelo Google. "
+                            "Crie uma chave nova em uma conta @gmail.com pessoal."
+                        )
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        log_fn(f"[Cota 429] Trocando modelo/chave ({curr_model})...")
+                        log_fn(f"[Limite 429] Aguardando 15s e alternando modelo/chave ({curr_model})...")
                         client_idx += 1
                         if client_idx % len(clients) == 0:
                             model_idx += 1
-                        time.sleep(2.0)
+                        time.sleep(15.0)
                     elif "503" in err_str or "UNAVAILABLE" in err_str:
-                        log_fn(f"[Servidor 503] Tentando novamente em 3s ({curr_model})...")
-                        time.sleep(3.0)
+                        log_fn(f"[Servidor 503] Tentando novamente em 5s ({curr_model})...")
+                        time.sleep(5.0)
                     else:
                         log_fn(f"[Aviso API] {curr_model}: {err_str[:120]}")
                         model_idx += 1
-                        time.sleep(1.5)
+                        time.sleep(2.0)
 
             if translated_batch is None:
                 raise RuntimeError(
@@ -169,7 +173,7 @@ def translate_with_checkpoint(
                     f"Traduzindo lote {b_idx + 1}/{total_batches} ({int(frac * 100)}%)",
                 )
             log_fn(f"[Lote {b_idx + 1}/{total_batches}] {accepted}/{len(chunk)} falas salvas no cache.")
-            time.sleep(1.2)
+            time.sleep(4.5)  # Mantém abaixo de 13 RPM para não estourar o Free Tier
 
     final_map = {sid: cache.get(orig, orig) for sid, orig in all_strings.items()}
     with open(translated_out_path, "w", encoding="utf-8") as f:
