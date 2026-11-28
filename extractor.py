@@ -7,7 +7,7 @@ from font_handler import auto_patch_romfs_fonts
 from stcm2l_handler import parse_stcm2l_strings, rebuild_stcm2l
 
 TEXT_EXTENSIONS = {".txt", ".json", ".csv", ".xml", ".yaml", ".yml", ".tsv", ".ini"}
-SKIP_CPK_PREFIXES = ("MOVIE", "VOICE", "SOUND", "BGM", "SE_", "THUMB", "VO.", "VO_")
+SKIP_CPK_PREFIXES = ("MOVIE", "VOICE", "SOUND", "BGM", "SE_", "THUMB", "VO.", "VO_", "GAME")
 
 
 def _is_media_cpk(filename: str) -> bool:

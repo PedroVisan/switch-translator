@@ -13,6 +13,33 @@ SYSTEM_PROMPT = (
     "Mantenha coerência de gênero, registre diálogos emocionais e termos de investigação de forma natural em PT-BR."
 )
 
+FREE_TIER_TEXT_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-4-hydrogen",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
+]
+
+EXCLUDED_TOKENS = (
+    "embedding",
+    "imagen",
+    "image",
+    "veo",
+    "tts",
+    "audio",
+    "live",
+    "transcribe",
+    "decision",
+    "robotics",
+    "2.5",
+    "2.0",
+    "1.5",
+)
+
 TAG_CHECK_RE = re.compile(r"(#Color\[\d+\]|#n|\\n|\{[^}]+\}|\[[^\]]+\])")
 
 
@@ -27,35 +54,30 @@ def _is_safe_translation(orig: str, translated: str) -> bool:
 
 
 def _discover_available_models(client: genai.Client) -> list[str]:
-    preferred_order = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash",
-    ]
-    found = []
+    found = set()
     try:
         for m in client.models.list():
             name = (m.name or "").replace("models/", "")
             methods = getattr(m, "supported_generation_methods", None) or []
-            if "gemini" in name and "generateContent" in methods:
-                if not any(x in name for x in ("embedding", "imagen", "veo", "tts", "audio", "pro")):
-                    found.append(name)
+            if ("gemini" in name or "gemma" in name) and (
+                not methods or "generateContent" in methods
+            ):
+                if not any(x in name for x in EXCLUDED_TOKENS):
+                    found.add(name)
     except Exception as e:
         err = str(e)
         if "API_KEY_INVALID" in err or "API key expired" in err or "400" in err:
             raise RuntimeError(
-                "A Gemini API Key foi rejeitada pelo Google (inválida ou bloqueada). "
+                "A Gemini API Key foi rejeitada pelo Google. "
                 "Gere uma nova chave em uma conta @gmail.com pessoal no Google AI Studio."
             )
-        return preferred_order
+        return list(FREE_TIER_TEXT_MODELS)
 
-    ordered = [m for m in preferred_order if m in found]
-    for m in found:
+    ordered = [m for m in FREE_TIER_TEXT_MODELS if m in found]
+    for m in sorted(found):
         if m not in ordered:
             ordered.append(m)
-    return ordered or preferred_order
+    return ordered or list(FREE_TIER_TEXT_MODELS)
 
 
 def _parse_json_response(raw_text: str) -> dict:
@@ -63,7 +85,35 @@ def _parse_json_response(raw_text: str) -> dict:
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
     return json.loads(cleaned)
+
+
+def _call_model(client: genai.Client, model_name: str, prompt_json: str) -> dict:
+    if model_name.startswith("gemma-"):
+        full_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"Retorne APENAS o objeto JSON traduzido, sem markdown ou texto extra:\n{prompt_json}"
+        )
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=full_prompt,
+            config=types.GenerateContentConfig(temperature=0.2),
+        )
+    else:
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt_json,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0.2,
+            ),
+        )
+    return _parse_json_response(resp.text or "{}")
 
 
 def translate_with_checkpoint(
@@ -94,7 +144,10 @@ def translate_with_checkpoint(
     api_keys = [k.strip() for k in api_key.split(",") if k.strip()]
     clients = [genai.Client(api_key=k) for k in api_keys]
     models = _discover_available_models(clients[0])
-    log_fn(f"[Gemini] {len(clients)} chave(s) ativa(s) | Fila de modelos: {', '.join(models[:4])}")
+    log_fn(
+        f"[Gemini] {len(clients)} chave(s) ativa(s) | "
+        f"{len(models)} modelos na fila: {', '.join(models)}"
+    )
 
     if pending_texts:
         total_batches = (len(pending_texts) + batch_size - 1) // batch_size
@@ -116,16 +169,7 @@ def translate_with_checkpoint(
                 curr_model = models[model_idx % len(models)]
 
                 try:
-                    resp = curr_client.models.generate_content(
-                        model=curr_model,
-                        contents=prompt_json,
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_PROMPT,
-                            response_mime_type="application/json",
-                            temperature=0.2,
-                        ),
-                    )
-                    parsed = _parse_json_response(resp.text or "{}")
+                    parsed = _call_model(curr_client, curr_model, prompt_json)
                     if isinstance(parsed, dict):
                         translated_batch = parsed
                 except Exception as err:
@@ -135,8 +179,13 @@ def translate_with_checkpoint(
                             "Chave de API inválida ou expirada pelo Google. "
                             "Crie uma chave nova em uma conta @gmail.com pessoal."
                         )
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        log_fn(f"[Limite 429] Aguardando 15s e alternando modelo/chave ({curr_model})...")
+                    if "404" in err_str or "NOT_FOUND" in err_str:
+                        log_fn(f"[Indisponível 404] Pulando {curr_model}...")
+                        model_idx += 1
+                    elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        log_fn(
+                            f"[Limite 429] Aguardando 15s e alternando modelo/chave ({curr_model})..."
+                        )
                         client_idx += 1
                         if client_idx % len(clients) == 0:
                             model_idx += 1
@@ -151,7 +200,7 @@ def translate_with_checkpoint(
 
             if translated_batch is None:
                 raise RuntimeError(
-                    "Cota diária esgotada em todas as chaves/modelos. "
+                    "Cota diária esgotada em todas as chaves/modelos disponíveis. "
                     "O progresso foi salvo no translation_cache.json; retome mais tarde."
                 )
 
@@ -172,8 +221,10 @@ def translate_with_checkpoint(
                     frac,
                     f"Traduzindo lote {b_idx + 1}/{total_batches} ({int(frac * 100)}%)",
                 )
-            log_fn(f"[Lote {b_idx + 1}/{total_batches}] {accepted}/{len(chunk)} falas salvas no cache.")
-            time.sleep(4.5)  # Mantém abaixo de 13 RPM para não estourar o Free Tier
+            log_fn(
+                f"[Lote {b_idx + 1}/{total_batches}] {accepted}/{len(chunk)} falas salvas no cache."
+            )
+            time.sleep(4.5)
 
     final_map = {sid: cache.get(orig, orig) for sid, orig in all_strings.items()}
     with open(translated_out_path, "w", encoding="utf-8") as f:

@@ -1,6 +1,11 @@
 from pathlib import Path
 import struct
-from cpk_handler import _decompress_crilayla, _parse_utf_table, repack_cpk
+from cpk_handler import (
+    _decompress_crilayla,
+    _parse_utf_table,
+    cpk_has_extensions,
+    repack_cpk,
+)
 
 PT_GLYPH_SPECS = [
     # Minúsculas acentuadas
@@ -41,33 +46,36 @@ def _utf8_key(ch: str) -> int:
     return int.from_bytes(ch.encode("utf-8"), "big")
 
 
-def _decode_4bpp(raw: bytes, w: int, h: int) -> list[list[int]]:
-    grid = [[0] * w for _ in range(h)]
-    total = w * h
-    for idx in range(total):
-        b_idx = idx // 2
-        if b_idx >= len(raw):
-            break
-        byte_val = raw[b_idx]
-        nib = (byte_val >> 4) if (idx % 2 == 0) else (byte_val & 0x0F)
-        grid[idx // w][idx % w] = nib
-    return grid
-
-
-def _encode_4bpp(grid: list[list[int]]) -> bytes:
-    h = len(grid)
-    w = len(grid[0]) if h else 0
-    out = bytearray((w * h + 1) // 2)
-    idx = 0
+def _decode_4bpp(data: bytes, w: int, h: int) -> list[list[int]]:
+    stride = ((w + 7) // 8) * 4
+    rows: list[list[int]] = []
     for y in range(h):
-        row = grid[y]
+        row: list[int] = []
+        row_off = y * stride
         for x in range(w):
-            val = max(0, min(15, row[x]))
-            if idx % 2 == 0:
-                out[idx // 2] |= val << 4
+            byte_idx = row_off + (x // 2)
+            b = data[byte_idx] if byte_idx < len(data) else 0
+            val = (b & 0x0F) if (x % 2 == 0) else ((b >> 4) & 0x0F)
+            row.append(val)
+        rows.append(row)
+    return rows
+
+
+def _encode_4bpp(rows: list[list[int]], w: int | None = None, h: int | None = None) -> bytes:
+    h = len(rows) if h is None else h
+    w = (len(rows[0]) if rows else 0) if w is None else w
+    stride = ((w + 7) // 8) * 4
+    out = bytearray(stride * h)
+    for y in range(h):
+        row = rows[y] if y < len(rows) else []
+        row_off = y * stride
+        for x in range(w):
+            v = max(0, min(15, row[x] if x < len(row) else 0))
+            byte_idx = row_off + (x // 2)
+            if x % 2 == 0:
+                out[byte_idx] = (out[byte_idx] & 0xF0) | v
             else:
-                out[idx // 2] |= val
-            idx += 1
+                out[byte_idx] = (out[byte_idx] & 0x0F) | (v << 4)
     return bytes(out)
 
 
@@ -324,49 +332,59 @@ def patch_ffu_bytes(ffu_data: bytes) -> bytes:
     return bytes(new_hdr) + bytes(new_t1) + bytes(new_t2) + bytes(px_blob)
 
 
-def auto_patch_romfs_fonts(romfs_dir: str, patch_romfs_dir: str, log_fn=print) -> int:
+def auto_patch_romfs_fonts(romfs_dir: str, output_romfs_dir: str, log_fn=print) -> int:
     """
-    Varre os arquivos .CPK do RomFS em busca de fontes UF (.ffu), injeta os glifos
-    acentuados do PT-BR (á..ç, Á..Ç, º, ª) e gera o CPK atualizado no patch LayeredFS.
-    Retorna a quantidade total de fontes atualizadas.
+    Procura fontes .ffu tanto soltas na pasta romfs quanto dentro de QUALQUER arquivo .CPK
+    (inspecionando a TOC sem depender do nome do CPK) e injeta os glifos acentuados PT-BR.
     """
     romfs_path = Path(romfs_dir)
-    out_romfs = Path(patch_romfs_dir)
-    out_romfs.mkdir(parents=True, exist_ok=True)
-    patched_total = 0
+    out_path = Path(output_romfs_dir)
+    total_patched = 0
 
+    # 1. Fontes .ffu soltas diretamente na árvore romfs
+    for ffu_file in sorted(romfs_path.rglob("*")):
+        if ffu_file.is_file() and ffu_file.suffix.lower() == ".ffu":
+            patched = patch_ffu_bytes(ffu_file.read_bytes())
+            rel = ffu_file.relative_to(romfs_path)
+            dest = out_path / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(patched)
+            total_patched += 1
+            log_fn(f"[Fonte] {rel} acentuada (arquivo solto)")
+
+    # 2. Fontes .ffu empacotadas dentro de qualquer .CPK
     for cpk_path in sorted(romfs_path.rglob("*")):
         if not cpk_path.is_file() or cpk_path.suffix.lower() != ".cpk":
             continue
+        if not cpk_has_extensions(str(cpk_path), (".ffu",)):
+            continue
+
+        rel_cpk = cpk_path.relative_to(romfs_path)
+        source_cpk = (out_path / rel_cpk) if (out_path / rel_cpk).exists() else cpk_path
+        dest_cpk = out_path / rel_cpk
+        dest_cpk.parent.mkdir(parents=True, exist_ok=True)
 
         modified_fonts: dict[str, bytes] = {}
-        with open(cpk_path, "rb") as f:
-            if f.read(4) != b"CPK ":
-                continue
+        with open(source_cpk, "rb") as f:
             f.seek(8)
-            hdr_sz = struct.unpack("<Q", f.read(8))[0]
-            info = _parse_utf_table(f.read(hdr_sz))[0]
-            toc_off, content_off = info["TocOffset"], info["ContentOffset"]
-            base = toc_off if (not content_off or toc_off < content_off) else content_off
-
-            f.seek(toc_off + 8)
-            toc_sz = struct.unpack("<Q", f.read(8))[0]
-            entries = _parse_utf_table(f.read(toc_sz))
+            info = _parse_utf_table(f.read(struct.unpack("<Q", f.read(8))[0]))[0]
+            toc, co = info["TocOffset"], info["ContentOffset"]
+            base = toc if (not co or toc < co) else co
+            f.seek(toc + 8)
+            entries = _parse_utf_table(f.read(struct.unpack("<Q", f.read(8))[0]))
 
             for e in entries:
-                fn = e.get("FileName", "")
-                if fn.lower().endswith(".ffu"):
+                fname = e.get("FileName", "") or ""
+                if fname.lower().endswith(".ffu"):
+                    dir_name = e.get("DirName", "") or ""
+                    rel_key = f"{dir_name}/{fname}".strip("/")
                     f.seek(base + e["FileOffset"])
                     raw_ffu = _decompress_crilayla(f.read(e["FileSize"]))
-                    if raw_ffu.startswith(b"UF"):
-                        rel_key = f"{e.get('DirName', '')}/{fn}".lstrip("/")
-                        modified_fonts[rel_key] = patch_ffu_bytes(raw_ffu)
+                    modified_fonts[rel_key] = patch_ffu_bytes(raw_ffu)
 
         if modified_fonts:
-            target_cpk = out_romfs / cpk_path.name
-            base_cpk = target_cpk if target_cpk.exists() else cpk_path
-            repack_cpk(str(base_cpk), modified_fonts, str(target_cpk))
-            patched_total += len(modified_fonts)
-            log_fn(f"[Fonte] {len(modified_fonts)} fonte(s) .ffu acentuada(s) em {cpk_path.name}")
+            repack_cpk(str(source_cpk), modified_fonts, str(dest_cpk))
+            total_patched += len(modified_fonts)
+            log_fn(f"[Fonte] {len(modified_fonts)} fonte(s) .ffu acentuada(s) em {rel_cpk}")
 
-    return patched_total
+    return total_patched

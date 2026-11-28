@@ -375,3 +375,28 @@ def repack_cpk(orig_cpk_path: str, modified_files: dict[str, bytes], out_cpk_pat
             out_f.seek(0)
             out_f.write(b"CPK " + cpk_flags + struct.pack("<Q", len(final_hdr_bytes)))
             out_f.write(final_hdr_bytes)
+            
+def cpk_has_extensions(cpk_path: str, exts: tuple[str, ...]) -> bool:
+    """Lê apenas o índice TOC do CPK (em milissegundos) e verifica se contém alguma extensão desejada."""
+    try:
+        with open(cpk_path, "rb") as f:
+            if f.read(4) != b"CPK ":
+                return False
+            f.seek(8)
+            info_size = struct.unpack("<Q", f.read(8))[0]
+            info = _parse_utf_table(f.read(info_size))[0]
+            toc_off = info.get("TocOffset", 0)
+            if not toc_off:
+                return False
+            f.seek(toc_off)
+            if f.read(4) != b"TOC ":
+                return False
+            f.seek(toc_off + 8)
+            toc_size = struct.unpack("<Q", f.read(8))[0]
+            entries = _parse_utf_table(f.read(toc_size))
+            return any(
+                (e.get("FileName", "") or "").lower().endswith(exts)
+                for e in entries
+            )
+    except Exception:
+        return False
